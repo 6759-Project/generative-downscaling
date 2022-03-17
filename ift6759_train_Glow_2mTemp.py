@@ -37,7 +37,7 @@ def preprocess_vds(data_lo, data_hi, batch_size=100, buffer_size=1000, supervise
         data = tf.data.Dataset.zip((data_lo.shuffle(buffer_size), data_hi.shuffle(buffer_size)))
     return data.batch(batch_size)
 
-# indices = tdex.indices('time')
+# indices = tdex.indices('Time')
 # def eval_climdex(true, pred, coords):
 #     true_arr = xr.DataArray(true, coords=coords)
 #     pred_arr = xr.DataArray(pred, coords=coords)
@@ -69,6 +69,8 @@ zarr_hr = xr.open_zarr('data/processed/temp/1406/temp_1406_processed.zarr')
 # center it to zero
 zarr_lr, monthly_means_lr = remove_monthly_means(zarr_lr, time_dim='date')
 zarr_hr, monthly_means_hr = remove_monthly_means(zarr_hr, time_dim='date')
+
+# import ipdb; ipdb.set_trace()
 
 # make data numpy arrays (unsuited for large data):
 # each ndarray have shape [date, lat, lon]
@@ -105,5 +107,33 @@ dataset_test_lr = dataset_test_lr.map(upsample(lat_hr, lon_hr, tf.image.ResizeMe
 train_ds = preprocess_vds(dataset_train_lr, dataset_train_hr, batch_size=10, buffer_size=train_size, supervised=False)
 test_ds = preprocess_vds(dataset_test_lr, dataset_test_hr, batch_size=10, buffer_size=test_size, supervised=False)
 
+flow_hr = Invert(GlowFlow(num_layers=3, depth=8, coupling_nn_ctor=coupling_nn_glow(max_filters=256), name='glow_hr'))
+flow_lr = Invert(GlowFlow(num_layers=3, depth=8, coupling_nn_ctor=coupling_nn_glow(max_filters=256), name='glow_lr'))
 
+scale = ndarray_hr.shape[1] // ndarray_lr.shape[1]
+dx = adversarial.PatchDiscriminator((lat_hr, lon_hr,1))
+dy = adversarial.PatchDiscriminator((lat_hr, lon_hr,1))
+model_joint = JointFlowLVM(flow_lr, flow_hr, dx, dy,
+                            Gx_aux_loss=spatial_mae(scale, stride=scale),
+                            Gy_aux_loss=spatial_mae(scale),
+                            input_shape=(None,lat_hr, lon_hr,1))
 
+# these are all args in his fit_glow_jflvm() function from glow-downscaling-maxt.ipynb
+validate_freq=1
+warmup=1
+sample_batch_size=10
+load_batch_size=1200
+layers=4
+depth=8
+min_filters=32
+max_filters=256
+lam=1.0
+lam_decay=0.01
+alpha=1.0
+n_epochs=20
+
+for i in range(n_epochs):
+    model_joint.train(train_ds, steps_per_epoch=train_size//sample_batch_size, num_epochs=validate_freq,
+                          lam=lam-lam_decay*validate_freq*i, lam_decay=lam_decay, alpha=alpha)
+
+    break
