@@ -1,6 +1,7 @@
 import numpy as np
 import xarray as xr
 import tensorflow as tf
+import datetime
 
 # to install climdex:
 # python -m pip install git+https://github.com/bgroenks96/pyclimdex.git
@@ -73,8 +74,8 @@ zarr_hr, monthly_means_hr = remove_monthly_means(zarr_hr, time_dim='date')
 
 # make data numpy arrays (unsuited for large data):
 # each ndarray have shape [date, lat, lon]
-ndarray_lr = zarr_lr.to_array().to_numpy().squeeze()[:,:16,:16]
-ndarray_hr = zarr_hr.to_array().to_numpy().squeeze()[:,:16,:16]
+ndarray_lr = zarr_lr.to_array().to_numpy().squeeze()
+ndarray_hr = zarr_hr.to_array().to_numpy().squeeze()
 
 # Technically, we shouldn't have to do this, but we need to adjust our
 # preprocessing so the images are square with sizes of the powers of 2
@@ -137,8 +138,42 @@ lam_decay=0.01
 alpha=1.0
 n_epochs=20
 
+metrics_log=[]
+climdex_log=[]
 for i in range(n_epochs):
+    print(f'Training joint model for {validate_freq} epochs ({i}/{n_epochs} complete)', flush=True)
     model_joint.train(train_ds, steps_per_epoch=train_size//sample_batch_size, num_epochs=validate_freq,
                           lam=lam-lam_decay*validate_freq*i, lam_decay=lam_decay, alpha=alpha)
 
-    if i==2: break
+#     metrics = model_joint.evaluate(test_ds, test_size//sample_batch_size)
+#     model_joint.save('/tmp/test_jflvm_checkpoint')
+
+#     # custom log metrics as a dictionary (to be done in WandB)
+#     metrics_log.append(metrics)
+
+#     print('Evaluating ClimDEX indices on predictions')
+#     y_true, y_pred = [], []
+#     for x, y in tf.data.Dataset.zip((dataset_test_lr, dataset_test_hr)).batch(2*sample_batch_size):
+#         y_true.append(y)
+#         z, ildj = model_joint.G_zx.inverse(x)
+#         y_, fldj = model_joint.G_zy.forward(z)
+#         y_pred.append(y_)
+#     y_true = tf.concat(y_true, axis=0)
+#     y_pred = tf.concat(y_pred, axis=0)
+
+#     # computing climdex indices
+#     zarr_test = zarr_hr.isel(time=slice(-test_size, None), lat=slice(0, 16), lon=slice(0,16))
+#     txx_bias, txn_bias = eval_climdex(y_true.numpy(), y_pred.numpy(), zarr_test.coords)
+#     txx_bias_mean, txx_bias_std = txx_bias.mean().values, txx_bias.std().values
+#     txn_bias_mean, txn_bias_std = txn_bias.mean().values, txn_bias.std().values
+
+#     # logging
+#     climdex_n={'txx_bias_mean':txx_bias_mean,
+#                 'txx_bias_std':txx_bias_std,
+#                 'txn_bias_mean':txn_bias_mean,
+#                 'txn_bias_std':txn_bias_std}
+#     climdex_log.append(climdex_n)
+
+# # saving custom logs
+# np.save('custom_logs/prilimary_results_metrics_'+datetime.datetime.now().strftime("%m-%d-%Y_%H-%M-%S")+'.npy', metrics_log)
+# np.save('custom_logs/prilimary_results_climdex_'+datetime.datetime.now().strftime("%m-%d-%Y_%H-%M-%S")+'.npy', climdex_log)
