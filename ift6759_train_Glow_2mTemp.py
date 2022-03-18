@@ -8,8 +8,9 @@ import tensorflow as tf
 # some how this doesn't work:
 # python -m pip install git+https://github.com/bgroenks96/normalizing-flows
 
-# I copied the normalizing_flow folder from github in this project and
-# had to downgrade from tensorflow-probability==0.16.0 to 0.15.0
+# I copied the normalizing_flow folder from github (same commit as the
+# submodule in Groenke's generative-downscaling points) in this project.
+# I also had to downgrade from tensorflow-probability==0.16.0 to 0.15.0
 # reminder to generate new environment.yml if all works out
 
 
@@ -37,17 +38,17 @@ def preprocess_vds(data_lo, data_hi, batch_size=100, buffer_size=1000, supervise
         data = tf.data.Dataset.zip((data_lo.shuffle(buffer_size), data_hi.shuffle(buffer_size)))
     return data.batch(batch_size)
 
-# indices = tdex.indices('Time')
-# def eval_climdex(true, pred, coords):
-#     true_arr = xr.DataArray(true, coords=coords)
-#     pred_arr = xr.DataArray(pred, coords=coords)
-#     txx_true = indices.monthly_txx(true_arr)
-#     txx_pred = indices.monthly_txx(pred_arr)
-#     txn_true = indices.monthly_txn(true_arr)
-#     txn_pred = indices.monthly_txn(pred_arr)
-#     txx_bias = txx_pred - txx_true
-#     txn_bias = txn_pred - txn_true
-#     return txx_bias, txn_bias
+indices = tdex.indices('Time')
+def eval_climdex(true, pred, coords):
+    true_arr = xr.DataArray(true, coords=coords)
+    pred_arr = xr.DataArray(pred, coords=coords)
+    txx_true = indices.monthly_txx(true_arr)
+    txx_pred = indices.monthly_txx(pred_arr)
+    txn_true = indices.monthly_txn(true_arr)
+    txn_pred = indices.monthly_txn(pred_arr)
+    txx_bias = txx_pred - txx_true
+    txn_bias = txn_pred - txn_true
+    return txx_bias, txn_bias
 
 def spatial_mae(scale, stride=1):
     """
@@ -70,12 +71,16 @@ zarr_hr = xr.open_zarr('data/processed/temp/1406/temp_1406_processed.zarr')
 zarr_lr, monthly_means_lr = remove_monthly_means(zarr_lr, time_dim='date')
 zarr_hr, monthly_means_hr = remove_monthly_means(zarr_hr, time_dim='date')
 
-# import ipdb; ipdb.set_trace()
-
 # make data numpy arrays (unsuited for large data):
 # each ndarray have shape [date, lat, lon]
-ndarray_lr = zarr_lr.to_array().to_numpy().squeeze()
-ndarray_hr = zarr_hr.to_array().to_numpy().squeeze()
+ndarray_lr = zarr_lr.to_array().to_numpy().squeeze()[:,:16,:16]
+ndarray_hr = zarr_hr.to_array().to_numpy().squeeze()[:,:16,:16]
+
+# Technically, we shouldn't have to do this, but we need to adjust our
+# preprocessing so the images are square with sizes of the powers of 2
+# meaning (16,16) or (32,32) or (64,64), etc..
+ndarray_lr = ndarray_lr[:,:16,:16]
+ndarray_hr = ndarray_hr[:,:16,:16]
 
 # defining tensorflow datasets
 # this batches the data along the date axis to yield
@@ -136,4 +141,4 @@ for i in range(n_epochs):
     model_joint.train(train_ds, steps_per_epoch=train_size//sample_batch_size, num_epochs=validate_freq,
                           lam=lam-lam_decay*validate_freq*i, lam_decay=lam_decay, alpha=alpha)
 
-    break
+    if i==2: break
