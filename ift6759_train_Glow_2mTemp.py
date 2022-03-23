@@ -73,14 +73,14 @@ zarr_hr, monthly_means_hr = remove_monthly_means(zarr_hr, time_dim='date')
 
 # make data numpy arrays (unsuited for large data):
 # each ndarray have shape [date, lat, lon]
-ndarray_lr = zarr_lr.to_array().to_numpy().squeeze()[:,:16,:16]
-ndarray_hr = zarr_hr.to_array().to_numpy().squeeze()[:,:16,:16]
+ndarray_lr = zarr_lr.to_array().to_numpy().squeeze()
+ndarray_hr = zarr_hr.to_array().to_numpy().squeeze()
 
 # Technically, we shouldn't have to do this, but we need to adjust our
 # preprocessing so the images are square with sizes of the powers of 2
 # meaning (16,16) or (32,32) or (64,64), etc..
-ndarray_lr = ndarray_lr[:,:16,:16]
-ndarray_hr = ndarray_hr[:,:16,:16]
+ndarray_lr = ndarray_lr
+ndarray_hr = ndarray_hr
 
 # defining tensorflow datasets
 # this batches the data along the date axis to yield
