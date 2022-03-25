@@ -10,15 +10,13 @@ from typing import List
 import numpy as np
 import xarray as xr
 
-from tqdm import tqdm
-
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 
 EPSILON = .0001
-NA_LAT = (0, 95+EPSILON)  # epsilon to avoid non-inclusive right
-NA_LON = (-140, -50+EPSILON)  # epsilon to avoid non-inclusive right
+NA_LAT = (25.3125, 64.6875+EPSILON)  # epsilon to avoid non-inclusive right
+NA_LON = (-129.375, -78.75+EPSILON)  # epsilon to avoid non-inclusive right
 KELVIN_TO_CELSIUS = -273.15
 
 
@@ -33,7 +31,7 @@ def filter_and_concatenate(
     metric: str
 ) -> xr.Dataset:
     subsets = []
-    for fname in tqdm(fnames):
+    for fname in fnames:
         subset =  xr.open_dataset(fname)
 
         subset['lon'] = subset['lon'] - 180  # make longitude coordinates symmetric
@@ -65,7 +63,6 @@ def process_raw_weatherbench(data_dir: os.PathLike) -> None:
             raw_dir = os.path.join(data_dir,"raw",metric,res)
             file_names = [os.path.join(raw_dir, fname) for fname in os.listdir(raw_dir)]
 
-            log.info(f"processing {metric}/{res}...")
             result = filter_and_concatenate(file_names, metric=metric)
 
             dest_dir = os.path.join(data_dir,"processed",metric,res)
