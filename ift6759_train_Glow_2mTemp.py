@@ -3,6 +3,7 @@ import xarray as xr
 import tensorflow as tf
 import datetime
 import wandb
+import os
 
 # to install climdex:
 # python -m pip install git+https://github.com/bgroenks96/pyclimdex.git
@@ -27,7 +28,7 @@ from normalizing_flows.flows.glow import GlowFlow, coupling_nn_glow
 from utils.distributions import normal
 from tensorflow.keras.optimizers import Adamax
 
-# wandb.init(project="Train-Glow-2mTemp", entity="6759-proj")
+wandb.init(project="Train-Glow-2mTemp", entity="6759-proj")
 
 def upsample(new_wt, new_ht, method, scale_factor=1):
     @tf.function
@@ -42,7 +43,7 @@ def preprocess_vds(data_lo, data_hi, batch_size=100, buffer_size=1000, supervise
         data = tf.data.Dataset.zip((data_lo.shuffle(buffer_size), data_hi.shuffle(buffer_size)))
     return data.batch(batch_size)
 
-indices = tdex.indices('Time')
+indices = tdex.indices('date')
 def eval_climdex(true, pred, coords):
     true_arr = xr.DataArray(true, coords=coords)
     pred_arr = xr.DataArray(pred, coords=coords)
@@ -78,7 +79,7 @@ zarr_hr, monthly_means_hr = remove_monthly_means(zarr_hr, time_dim='date')
 # train and test split the zarr arrays
 assert len(zarr_hr.date)==len(zarr_lr.date)
 
-n_total = 800 # len(zarr_hr.date) # uncomment this to run on full dataset
+n_total = len(zarr_hr.date) # uncomment this to run on full dataset
 n_test = int(1/8 * n_total)
 n_train = n_total - n_test
 
@@ -146,32 +147,30 @@ lam_decay=0.01
 alpha=1.0
 n_epochs=20
 
-# wandb.config = {'validate_freq':validate_freq,
-#                 'warmup':warmup,
-#                 'sample_batch_size':sample_batch_size,
-#                 'load_batch_size':load_batch_size,
-#                 'layers':layers,
-#                 'depth':depth,
-#                 'min_filters':min_filters,
-#                 'max_filters':max_filters,
-#                 'lam':lam,
-#                 'lam_decay':lam_decay,
-#                 'alpha':alpha,
-#                 'n_epochs':n_epochs}
+wandb.config = {'validate_freq':validate_freq,
+                'warmup':warmup,
+                'sample_batch_size':sample_batch_size,
+                'load_batch_size':load_batch_size,
+                'layers':layers,
+                'depth':depth,
+                'min_filters':min_filters,
+                'max_filters':max_filters,
+                'lam':lam,
+                'lam_decay':lam_decay,
+                'alpha':alpha,
+                'n_epochs':n_epochs}
 
-# metrics_log=[]
-# climdex_log=[]
 for i in range(n_epochs):
+    # training
     print(f'Training joint model for {validate_freq} epochs ({i}/{n_epochs} complete)', flush=True)
     train_metrics = model_joint.train(train_ds, steps_per_epoch=n_train//sample_batch_size, num_epochs=validate_freq,
                           lam=lam-lam_decay*validate_freq*i, lam_decay=lam_decay, alpha=alpha)
 
+    # evaluation
     eval_metrics = model_joint.evaluate(test_ds, n_test//sample_batch_size)
     model_joint.save('/tmp/test_jflvm_checkpoint')
 
-    # import ipdb;ipdb.set_trace()
-    # metrics_log.append(metrics)
-
+    # climdex
     print('Evaluating ClimDEX indices on predictions')
     y_true, y_pred = [], []
     for x, y in tf.data.Dataset.zip((dataset_test_lr, dataset_test_hr)).batch(2*sample_batch_size):
@@ -183,29 +182,27 @@ for i in range(n_epochs):
     y_pred = tf.concat(y_pred, axis=0)
 
     # computing climdex indices
-    txx_bias, txn_bias = eval_climdex(y_true.numpy(), y_pred.numpy(), zarr_hr_test.coords)
+    txx_bias, txn_bias = eval_climdex(np.squeeze(y_true.numpy()), np.squeeze(y_pred.numpy()), zarr_hr_test.coords)
     txx_bias_mean, txx_bias_std = txx_bias.mean().values, txx_bias.std().values
     txn_bias_mean, txn_bias_std = txn_bias.mean().values, txn_bias.std().values
 
+    # printing climdex indices
     print('txx_bias_mean, txx_bias_std:', txx_bias_mean, txx_bias_std)
     print('txn_bias_mean, txn_bias_std:', txn_bias_mean, txn_bias_std)
-    # # logging in WandB
-    # for key, value in train_metrics.items():
-    #     wandb.log({'train_'+key: value[0]})
-    # for key, value in eval_metrics.items():
-    #     wandb.log({'eval_'+key: value[0]})
 
-    print(train_metrics)
-    print(eval_metrics)
+    # logging losses, metrics in WandB
+    for key, value in train_metrics.items():
+        wandb.log({'train_'+key: value[0]})
+    for key, value in eval_metrics.items():
+        wandb.log({'eval_'+key: value[0]})
+    # logging climdex indices in WandB
+    wandb.log({'txx_bias_mean':txx_bias_mean})
+    wandb.log({'txx_bias_std':txx_bias_std})
+    wandb.log({'txn_bias_mean':txn_bias_mean})
+    wandb.log({'txn_bias_std':txn_bias_std})
 
-
-    # climdex_n={'txx_bias_mean':txx_bias_mean,
-    #             'txx_bias_std':txx_bias_std,
-    #             'txn_bias_mean':txn_bias_mean,
-    #             'txn_bias_std':txn_bias_std}
-    # climdex_log.append(climdex_n)
-    if i==2:break
-
-# saving custom logs
-# np.save('custom_logs/prilimary_results_metrics_'+datetime.datetime.now().strftime("%m-%d-%Y_%H-%M-%S")+'.npy', metrics_log)
-# np.save('custom_logs/prilimary_results_climdex_'+datetime.datetime.now().strftime("%m-%d-%Y_%H-%M-%S")+'.npy', climdex_log)
+# saving the model
+if not os.path.exists('final_model'):
+    os.mkdir('./final_model')
+finale_model_path = model_joint.save('./final_model/')
+print('final model saved at:', finale_model_path)
