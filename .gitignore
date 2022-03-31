@@ -108,3 +108,9 @@ data/**
 *.secret.json
 mlruns/
 *.code-workspace
+
+# result folder
+final_model/
+
+# wand logging
+wandb/
