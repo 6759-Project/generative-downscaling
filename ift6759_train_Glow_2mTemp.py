@@ -147,7 +147,7 @@ lam_decay=0.01
 alpha=1.0
 n_epochs=20
 
-wandb.config = {'validate_freq':validate_freq,
+wandb.config.update({'validate_freq':validate_freq,
                 'warmup':warmup,
                 'sample_batch_size':sample_batch_size,
                 'load_batch_size':load_batch_size,
@@ -158,7 +158,7 @@ wandb.config = {'validate_freq':validate_freq,
                 'lam':lam,
                 'lam_decay':lam_decay,
                 'alpha':alpha,
-                'n_epochs':n_epochs}
+                'n_epochs':n_epochs})
 
 for i in range(n_epochs):
     # training
@@ -192,14 +192,14 @@ for i in range(n_epochs):
 
     # logging losses, metrics in WandB
     for key, value in train_metrics.items():
-        wandb.log({'train_'+key: value[0]})
+        wandb.log({'train_'+key: value[0]}, step=i)
     for key, value in eval_metrics.items():
-        wandb.log({'eval_'+key: value[0]})
+        wandb.log({'eval_'+key: value[0]}, step=i)
     # logging climdex indices in WandB
-    wandb.log({'txx_bias_mean':txx_bias_mean})
-    wandb.log({'txx_bias_std':txx_bias_std})
-    wandb.log({'txn_bias_mean':txn_bias_mean})
-    wandb.log({'txn_bias_std':txn_bias_std})
+    wandb.log({'txx_bias_mean':txx_bias_mean}, step=i)
+    wandb.log({'txx_bias_std':txx_bias_std}, step=i)
+    wandb.log({'txn_bias_mean':txn_bias_mean}, step=i)
+    wandb.log({'txn_bias_std':txn_bias_std}, step=i)
 
 # saving the model
 if not os.path.exists('final_model'):
