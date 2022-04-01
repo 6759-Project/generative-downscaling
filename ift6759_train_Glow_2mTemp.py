@@ -80,18 +80,28 @@ zarr_hr, monthly_means_hr = remove_monthly_means(zarr_hr, time_dim='date')
 assert len(zarr_hr.date)==len(zarr_lr.date)
 
 n_total = len(zarr_hr.date) # uncomment this to run on full dataset
-n_test = int(1/8 * n_total)
-n_train = n_total - n_test
+n_train = int(0.7*n_total)
+n_valid = int(0.2*n_total)
+n_test = n_total-n_train-n_valid
+
 
 zarr_lr_train = zarr_lr.isel(date=slice(0, n_train))
 zarr_hr_train = zarr_hr.isel(date=slice(0, n_train))
-zarr_lr_test = zarr_lr.isel(date=slice(n_train, n_train+n_test))
-zarr_hr_test = zarr_hr.isel(date=slice(n_train, n_train+n_test))
+
+zarr_lr_valid = zarr_lr.isel(date=slice(n_train, n_train+n_valid))
+zarr_hr_valid = zarr_hr.isel(date=slice(n_train, n_train+n_valid))
+
+zarr_lr_test = zarr_lr.isel(date=slice(n_train+n_valid, n_train+n_valid+n_test))
+zarr_hr_test = zarr_hr.isel(date=slice(n_train+n_valid, n_train+n_valid+n_test))
 
 # make data numpy arrays (unsuited for large data):
 # each ndarray have shape [date, lat, lon]
 ndarray_lr_train = zarr_lr_train.to_array().to_numpy().squeeze()
 ndarray_hr_train = zarr_hr_train.to_array().to_numpy().squeeze()
+
+ndarray_lr_valid = zarr_lr_valid.to_array().to_numpy().squeeze()
+ndarray_hr_valid = zarr_hr_valid.to_array().to_numpy().squeeze()
+
 ndarray_lr_test = zarr_lr_test.to_array().to_numpy().squeeze()
 ndarray_hr_test = zarr_hr_test.to_array().to_numpy().squeeze()
 
@@ -101,6 +111,10 @@ ndarray_hr_test = zarr_hr_test.to_array().to_numpy().squeeze()
 # We keep the last eighth of the sample for test set.
 dataset_train_lr = tf.data.Dataset.from_tensor_slices(ndarray_lr_train)
 dataset_train_hr = tf.data.Dataset.from_tensor_slices(ndarray_hr_train)
+
+dataset_valid_lr = tf.data.Dataset.from_tensor_slices(ndarray_lr_valid)
+dataset_valid_hr = tf.data.Dataset.from_tensor_slices(ndarray_hr_valid)
+
 dataset_test_lr = tf.data.Dataset.from_tensor_slices(ndarray_lr_test)
 dataset_test_hr = tf.data.Dataset.from_tensor_slices(ndarray_hr_test)
 
@@ -108,14 +122,23 @@ dataset_test_hr = tf.data.Dataset.from_tensor_slices(ndarray_hr_test)
 # dimensionality as the high res using the nearest neighbour algo
 # We first add a channel to all images
 dataset_train_lr = dataset_train_lr.map(lambda x: x[:,:,None])
-dataset_test_lr = dataset_test_lr.map(lambda x: x[:,:,None])
 dataset_train_hr = dataset_train_hr.map(lambda x: x[:,:,None])
+
+dataset_valid_lr = dataset_valid_lr.map(lambda x: x[:,:,None])
+dataset_valid_hr = dataset_valid_hr.map(lambda x: x[:,:,None])
+
+dataset_test_lr = dataset_test_lr.map(lambda x: x[:,:,None])
 dataset_test_hr = dataset_test_hr.map(lambda x: x[:,:,None])
+
 # import ipdb;ipdb.set_trace()
 # Then upsample the low res datasets
 lat_hr, lon_hr = ndarray_hr_train.shape[1:]
 dataset_train_lr = dataset_train_lr.map(upsample(lat_hr, lon_hr, tf.image.ResizeMethod.NEAREST_NEIGHBOR))
+dataset_valid_lr = dataset_valid_lr.map(upsample(lat_hr, lon_hr, tf.image.ResizeMethod.NEAREST_NEIGHBOR))
 dataset_test_lr = dataset_test_lr.map(upsample(lat_hr, lon_hr, tf.image.ResizeMethod.NEAREST_NEIGHBOR))
+import ipdb; ipdb.set_trace()
+
+#hemanth continue here
 
 # zipping the data together and shuffling each dataset individually
 # for "unsupervised learning"
