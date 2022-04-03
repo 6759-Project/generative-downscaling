@@ -27,6 +27,7 @@ from normalizing_flows.flows.image import Upsample
 from normalizing_flows.flows.glow import GlowFlow, coupling_nn_glow
 from utils.distributions import normal
 from tensorflow.keras.optimizers import Adamax
+import matplotlib.pyplot as plt
 
 #wandb.init(project="Train-Glow-2mTemp", entity="6759-proj")
 wandb.init(project="Train-Glow-2mTemp")
@@ -68,7 +69,7 @@ def spatial_mae(scale, stride=1):
         return tf.math.reduce_mean(tf.math.abs(y_avg - x_avg))
     return _spatial_mse
 
-import matplotlib.pyplot as plt
+#Function for visualizing our samples
 def plot_1xn(data, titles, cmin=-10., cmax=10.):
     n = len(data)
     plt.figure(figsize=(n*9,6))
@@ -150,8 +151,6 @@ dataset_valid_lr = dataset_valid_lr.map(upsample(lat_hr, lon_hr, tf.image.Resize
 dataset_test_lr = dataset_test_lr.map(upsample(lat_hr, lon_hr, tf.image.ResizeMethod.NEAREST_NEIGHBOR))
 #import ipdb; ipdb.set_trace()
 
-#hemanth continue here
-
 # zipping the data together and shuffling each dataset individually
 # for "unsupervised learning"
 train_ds = preprocess_vds(dataset_train_lr, dataset_train_hr, batch_size=10, buffer_size=n_train, supervised=False)
@@ -206,16 +205,24 @@ for i in range(n_epochs):
     # evaluation
     valid_eval_metrics = model_joint.evaluate(valid_ds, n_valid//sample_batch_size)
     test_eval_metrics = model_joint.evaluate(test_ds, n_test//sample_batch_size)
+    
+    # Sampling and Visualizing for every 3 epochs
     if i%3==0 and i!=0:
-        samples_x,samples_y = model_joint.sample(n=4)
-        plot_1xn(samples_x, r"Samples $x \sim P(X)$")
-        plot_1xn(samples_y, r"Samples $y \sim P(Y)$")
+        #Sampling and Visualizing x and y
+        samples_x,samples_y = model_joint.sample(n=4)  
+        plot_1xn(samples_x, r"Samples $x \sim P(X)$")  
+        plot_1xn(samples_y, r"Samples $y \sim P(Y)$")  
         x_t, y_t = next(test_ds_paired.__iter__())
-        xp_t = model_joint.predict_x(y_t)
+        
+        # Conditional Sampling
+        xp_t = model_joint.predict_x(y_t)                
         yp_t = model_joint.predict_y(x_t)
-        plot_1xn([x_t[0], y_t[0], xp_t[0], yp_t[0]], r"Predictions $X \leftrightarrow Y$")
-        model_joint.save('model_checkpoints/test_jflvm_checkpoint')
-        #model_joint.save('/tmp/valid_jflvm_ckpt')
+        # Visualizing Inputs & Outputs
+        plot_1xn([x_t[0], y_t[0], xp_t[0], yp_t[0]], r"Predictions $X \leftrightarrow Y$") 
+    
+    #Saving the model
+    model_joint.save('model_checkpoints/test_jflvm_checkpoint')
+    
     # climdex
     print('Evaluating valid set ClimDEX indices on predictions')
     y_true, y_pred = [], []
@@ -252,6 +259,7 @@ for i in range(n_epochs):
     wandb.log({'valid_txn_bias_mean':valid_txn_bias_mean})
     wandb.log({'valid_txn_bias_std':valid_txn_bias_std})
     
+#Test set evaluation
 print('Evaluating Test ClimDEX indices on predictions')
 y_true, y_pred = [], []
 for x, y in tf.data.Dataset.zip((dataset_test_lr, dataset_test_hr)).batch(2*sample_batch_size):
