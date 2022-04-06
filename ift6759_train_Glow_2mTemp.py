@@ -183,7 +183,7 @@ lam_decay=0.01
 alpha=1.0
 n_epochs=10
 
-wandb.config = {'validate_freq':validate_freq,
+wandb.config.update({'validate_freq':validate_freq,
                 'warmup':warmup,
                 'sample_batch_size':sample_batch_size,
                 'load_batch_size':load_batch_size,
@@ -194,7 +194,7 @@ wandb.config = {'validate_freq':validate_freq,
                 'lam':lam,
                 'lam_decay':lam_decay,
                 'alpha':alpha,
-                'n_epochs':n_epochs}
+                'n_epochs':n_epochs})
 
 for i in range(n_epochs):
     # training
@@ -249,15 +249,15 @@ for i in range(n_epochs):
 
     # logging losses, metrics in WandB
     for key, value in train_metrics.items():
-        wandb.log({'train_'+key: value[0]})
+        wandb.log({'train_'+key: value[0]}, step=i)
     for key, value in valid_eval_metrics.items():
-        wandb.log({'valid_eval_'+key: value[0]})
+        wandb.log({'valid_eval_'+key: value[0]}, step=i)
     # logging climdex indices in WandB
-    wandb.log({'valid_mse':valid_mse})
-    wandb.log({'valid_txx_bias_mean':valid_txx_bias_mean})
-    wandb.log({'valid_txx_bias_std':valid_txx_bias_std})
-    wandb.log({'valid_txn_bias_mean':valid_txn_bias_mean})
-    wandb.log({'valid_txn_bias_std':valid_txn_bias_std})
+    wandb.log({'valid_mse':valid_mse}, step=i)
+    wandb.log({'valid_txx_bias_mean':valid_txx_bias_mean}, step=i)
+    wandb.log({'valid_txx_bias_std':valid_txx_bias_std}, step=i)
+    wandb.log({'valid_txn_bias_mean':valid_txn_bias_mean}, step=i)
+    wandb.log({'valid_txn_bias_std':valid_txn_bias_std}, step=i)
     
 #Test set evaluation
 print('Evaluating Test ClimDEX indices on predictions')
@@ -282,12 +282,12 @@ print('test_txn_bias_mean, test_txn_bias_std:', test_txn_bias_mean, test_txn_bia
 # logging losses, metrics in WandB
 
 for key, value in test_eval_metrics.items():
-    wandb.log({'test_eval_'+key: value[0]})
+    wandb.log({'test_eval_'+key: value[0]}, step=i)
     # logging climdex indices in WandB
-wandb.log({'test_txx_bias_mean':test_txx_bias_mean})
-wandb.log({'test_txx_bias_std':test_txx_bias_std})
-wandb.log({'test_txn_bias_mean':test_txn_bias_mean})
-wandb.log({'test_txn_bias_std':test_txn_bias_std})
+wandb.log({'test_txx_bias_mean':test_txx_bias_mean}, step=i)
+wandb.log({'test_txx_bias_std':test_txx_bias_std}, step=i)
+wandb.log({'test_txn_bias_mean':test_txn_bias_mean}, step=i)
+wandb.log({'test_txn_bias_std':test_txn_bias_std}, step=i)
 
 
 # saving the model

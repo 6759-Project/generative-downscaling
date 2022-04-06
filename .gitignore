@@ -108,3 +108,7 @@ data/**
 *.secret.json
 mlruns/
 *.code-workspace
+
+# 6759-proj
+wandb/
+final_model/
