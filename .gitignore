@@ -112,3 +112,4 @@ mlruns/
 # 6759-proj
 wandb/
 final_model/
+model_checkpoints/

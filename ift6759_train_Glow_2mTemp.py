@@ -4,6 +4,7 @@ import tensorflow as tf
 import datetime
 import wandb
 import os
+import time
 
 # to install climdex:
 # python -m pip install git+https://github.com/bgroenks96/pyclimdex.git
@@ -230,7 +231,8 @@ def main():
                                 Gx_aux_loss=spatial_mae(dl.scale, stride=dl.scale),
                                 Gy_aux_loss=spatial_mae(dl.scale),
                                 input_shape=(None, dl.lat_hr, dl.lon_hr, 1))
-
+    
+    start_time = time.time()
     for i in range(n_epochs):
         # training
         print(f'Training joint model for {validate_freq} epochs ({i}/{n_epochs} complete)', flush=True)
@@ -321,8 +323,10 @@ def main():
     print('test_txx_bias_mean, test_txx_bias_std:', test_txx_bias_mean, test_txx_bias_std)
     print('test_txn_bias_mean, test_txn_bias_std:', test_txn_bias_mean, test_txn_bias_std)
 
-    # logging losses, metrics in WandB
+    total_training_time = time.time() - start_time
+    print('total training time:', total_training_time)
 
+    # logging losses, metrics in WandB
     for key, value in test_eval_metrics.items():
         wandb.log({'test_eval_'+key: value[0]}, step=i)
         # logging climdex indices in WandB
@@ -330,13 +334,7 @@ def main():
     wandb.log({'test_txx_bias_std':test_txx_bias_std}, step=i)
     wandb.log({'test_txn_bias_mean':test_txn_bias_mean}, step=i)
     wandb.log({'test_txn_bias_std':test_txn_bias_std}, step=i)
-
-
-    # saving the model
-    if not os.path.exists('final_model'):
-        os.mkdir('./final_model')
-    finale_model_path = model_joint.save('./final_model/')
-    print('final model saved at:', finale_model_path)
+    wandb.log({'total_training_time':total_training_time}, step=i)
 
 
 if __name__ == "__main__":
