@@ -30,5 +30,5 @@ model_joint = JointFlowLVM(flow_lr, flow_hr, dx, dy,
                             Gy_aux_loss=spatial_mae(dl.scale),
                             input_shape=(None, dl.lat_hr, dl.lon_hr, 1))
 
-
-model_joint.load('model_checkpoints/test_jflvm_checkpoint', 2)
+import ipdb; ipdb.set_trace()
+model_joint.load('model_checkpoints/final_jflvm_checkpoint', 1)

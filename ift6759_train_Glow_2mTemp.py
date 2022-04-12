@@ -162,9 +162,9 @@ class DataLoaderTemp:
         # for "unsupervised learning"
         train_ds = preprocess_vds(dataset_train_lr, dataset_train_hr, batch_size=batch_size, buffer_size=n_train, supervised=False)
         valid_ds = preprocess_vds(dataset_valid_lr, dataset_valid_hr, batch_size=batch_size, buffer_size=n_valid, supervised=False)
-        valid_ds_paired = preprocess_vds(dataset_valid_lr, dataset_valid_hr, batch_size=batch_size, buffer_size=n_valid, supervised=True, shuffle=False)
+        valid_ds_paired = preprocess_vds(dataset_valid_lr, dataset_valid_hr, batch_size=100, buffer_size=n_valid, supervised=True, shuffle=False)
         test_ds = preprocess_vds(dataset_test_lr, dataset_test_hr, batch_size=batch_size, buffer_size=n_test, supervised=False)
-        test_ds_paired = preprocess_vds(dataset_test_lr, dataset_test_hr, batch_size=batch_size, buffer_size=n_test, supervised=True, shuffle=False)
+        test_ds_paired = preprocess_vds(dataset_test_lr, dataset_test_hr, batch_size=100, buffer_size=n_test, supervised=True, shuffle=False)
 
         scale = ndarray_hr_train.shape[1] // ndarray_lr_train.shape[1]
 
@@ -204,7 +204,7 @@ def main():
     lam=1.0
     lam_decay=0.01
     alpha=1.0
-    n_epochs=60
+    n_epochs=20
 
     wandb.config.update({'validate_freq':validate_freq,
                     'warmup':warmup,
@@ -243,7 +243,7 @@ def main():
         valid_eval_metrics = model_joint.evaluate(dl.valid_ds, dl.n_valid//sample_batch_size)
         
         # Sampling and Visualizing for every 3 epochs
-        if i%3==0 and i!=0:
+        if i%2==0 and i!=0:
             #Sampling and Visualizing x and y
             samples_x,samples_y = model_joint.sample(n=4)  
             plot_1xn(samples_x, r"Samples $x \sim P(X)$")
@@ -262,8 +262,8 @@ def main():
             plt.savefig('sampling_figures/Conditional_epoch{0:02d}'.format(i))
             plt.clf()
         
-        # Saving the model
-        model_joint.save(f'model_checkpoints/jflvm_checkpoint')
+        # # Saving the model
+        # model_joint.save(f'model_checkpoints/jflvm_checkpoint')
         
         # climdex
         print('Evaluating valid set ClimDEX indices on predictions')
@@ -314,6 +314,10 @@ def main():
     y_true = tf.concat(y_true, axis=0)
     y_pred = tf.concat(y_pred, axis=0)
 
+    # saving test y_pred and y_true as backup
+    np.save('test_y_true.npy', y_true.numpy())
+    np.save('test_y_pred.npy', y_pred.numpy())
+
     # computing climdex indices
     test_txx_bias, test_txn_bias = eval_climdex(np.squeeze(y_true.numpy()), np.squeeze(y_pred.numpy()), dl.zarr_hr_test.coords)
     test_txx_bias_mean, test_txx_bias_std = test_txx_bias.mean().values, test_txx_bias.std().values
@@ -335,6 +339,9 @@ def main():
     wandb.log({'test_txn_bias_mean':test_txn_bias_mean}, step=i)
     wandb.log({'test_txn_bias_std':test_txn_bias_std}, step=i)
     wandb.log({'total_training_time':total_training_time}, step=i)
+
+    # Saving the last model
+    model_joint.save(f'model_checkpoints/final_jflvm_checkpoint')
 
 
 if __name__ == "__main__":
