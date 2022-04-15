@@ -30,6 +30,16 @@ from utils.distributions import normal
 from tensorflow.keras.optimizers import Adamax
 import matplotlib.pyplot as plt
 
+def standardize(zarr_coarse, zarr_fine):
+    daily_means = zarr_coarse.groupby("date.month").mean()
+    daily_std = zarr_coarse.groupby("date.month").std()
+    coarse_standardized = (zarr_coarse - daily_means) / daily_std
+    fine_standardized = (zarr_fine - daily_means) / daily_std
+    return coarse_standardized, fine_standardized, daily_means, daily_std
+
+def destandardize(zarr, mean, std):
+    zarr_destandardized = (zarr * std) + mean
+    return zarr_destandardized
 
 def upsample(new_wt, new_ht, method, scale_factor=1):
     @tf.function
@@ -72,14 +82,16 @@ def spatial_mae(scale, stride=1):
     return _spatial_mse
 
 #Function for visualizing our samples
-def plot_1xn(data, titles, cmin=-10., cmax=10.):
+def plot_1xn(data, titles, cmin=-10., cmax=10., save=None):
     n = len(data)
-    plt.figure(figsize=(n*9,6))
+    fig = plt.figure(figsize=(n*9,6))
     for i in range(n):
         plt.subplot(1,n,i+1)
         plt.imshow(data[i].numpy().squeeze(), origin='lower')
         plt.colorbar(pad=0.04, shrink=0.5)
     plt.suptitle(titles, y=0.85)
+    if save is not None: fig.savefig(save)
+    fig.clf()
 
 class DataLoaderTemp:
     def __init__(
@@ -87,20 +99,27 @@ class DataLoaderTemp:
         path_lr='data/processed/temp/5625/temp_5625_processed.zarr',
         path_hr='data/processed/temp/1406/temp_1406_processed.zarr',
         n_total=None,
-        batch_size=10
+        batch_size=10,
+        custom_standardize=False,
+        supervised_training=False
     ):
         # load the data
         zarr_lr = xr.open_zarr(path_lr)
         zarr_hr = xr.open_zarr(path_hr)
-
-        # center it to zero
-        zarr_lr, monthly_means_lr = remove_monthly_means(zarr_lr, time_dim='date')
-        zarr_hr, monthly_means_hr = remove_monthly_means(zarr_hr, time_dim='date')
+        
+        if custom_standardize:
+            zarr_lr, zarr_hr, self.means, self.std = standardize(zarr_lr, zarr_hr)
+        else:
+            # just center it to zero
+            zarr_lr, monthly_means_lr = remove_monthly_means(zarr_lr, time_dim='date')
+            zarr_hr, monthly_means_hr = remove_monthly_means(zarr_hr, time_dim='date')
+        
 
         # train and test split the zarr arrays
         assert len(zarr_hr.date)==len(zarr_lr.date)
 
         if n_total is None: n_total = len(zarr_hr.date)
+        print('n_total:', n_total)
         n_train = int(0.7*n_total)
         n_valid = int(0.2*n_total)
         n_test = n_total-n_train-n_valid
@@ -160,15 +179,19 @@ class DataLoaderTemp:
 
         # zipping the data together and shuffling each dataset individually
         # for "unsupervised learning"
-        train_ds = preprocess_vds(dataset_train_lr, dataset_train_hr, batch_size=batch_size, buffer_size=n_train, supervised=False)
-        valid_ds = preprocess_vds(dataset_valid_lr, dataset_valid_hr, batch_size=batch_size, buffer_size=n_valid, supervised=False)
+        train_ds = preprocess_vds(dataset_train_lr, dataset_train_hr, batch_size=batch_size, buffer_size=n_train, supervised=supervised_training)
+        valid_ds = preprocess_vds(dataset_valid_lr, dataset_valid_hr, batch_size=batch_size, buffer_size=n_valid, supervised=supervised_training)
         valid_ds_paired = preprocess_vds(dataset_valid_lr, dataset_valid_hr, batch_size=100, buffer_size=n_valid, supervised=True, shuffle=False)
-        test_ds = preprocess_vds(dataset_test_lr, dataset_test_hr, batch_size=batch_size, buffer_size=n_test, supervised=False)
+        test_ds = preprocess_vds(dataset_test_lr, dataset_test_hr, batch_size=batch_size, buffer_size=n_test, supervised=supervised_training)
         test_ds_paired = preprocess_vds(dataset_test_lr, dataset_test_hr, batch_size=100, buffer_size=n_test, supervised=True, shuffle=False)
 
         scale = ndarray_hr_train.shape[1] // ndarray_lr_train.shape[1]
 
         # Setting attributes
+        self.zarr_lr_train = zarr_lr_train
+        self.zarr_lr_valid = zarr_lr_valid
+        self.zarr_lr_test = zarr_lr_test
+        self.zarr_hr_train = zarr_hr_train
         self.zarr_hr_valid = zarr_hr_valid
         self.zarr_hr_test = zarr_hr_test
         self.train_ds = train_ds
@@ -185,6 +208,7 @@ class DataLoaderTemp:
         self.scale = scale
         self.monthly_means_lr = monthly_means_lr
         self.monthly_means_hr = monthly_means_hr
+        self.custom_standardize = custom_standardize
 
 
 
@@ -205,6 +229,9 @@ def main():
     lam_decay=0.01
     alpha=1.0
     n_epochs=20
+    custom_standardize=False
+    supervised_training=True
+    
 
     wandb.config.update({'validate_freq':validate_freq,
                     'warmup':warmup,
@@ -217,9 +244,11 @@ def main():
                     'lam':lam,
                     'lam_decay':lam_decay,
                     'alpha':alpha,
-                    'n_epochs':n_epochs})
+                    'n_epochs':n_epochs,
+                    'custom_standardize':custom_standardize,
+                    'supervised_training': supervised_training})
 
-    dl = DataLoaderTemp(batch_size=sample_batch_size)
+    dl = DataLoaderTemp(batch_size=sample_batch_size, custom_standardize=custom_standardize, supervised_training=supervised_training)
 
     flow_hr = Invert(GlowFlow(num_layers=layers, depth=depth, coupling_nn_ctor=coupling_nn_glow(max_filters=max_filters), name='glow_hr'))
     flow_lr = Invert(GlowFlow(num_layers=layers, depth=depth, coupling_nn_ctor=coupling_nn_glow(max_filters=max_filters), name='glow_lr'))
@@ -237,30 +266,22 @@ def main():
         # training
         print(f'Training joint model for {validate_freq} epochs ({i}/{n_epochs} complete)', flush=True)
         #model_joint.load_weights('model_checkpoints/test_jflvm_checkpoint')
-        train_metrics = model_joint.train(dl.train_ds, steps_per_epoch=dl.n_train//sample_batch_size, num_epochs=validate_freq,lam=lam-lam_decay*validate_freq*i, lam_decay=lam_decay, alpha=alpha)
+        train_metrics = model_joint.train(dl.train_ds, steps_per_epoch=dl.n_train//sample_batch_size, num_epochs=validate_freq, lam=lam-lam_decay*validate_freq*i, lam_decay=lam_decay, alpha=alpha)
 
         # evaluation
         valid_eval_metrics = model_joint.evaluate(dl.valid_ds, dl.n_valid//sample_batch_size)
         
-        # Sampling and Visualizing for every 3 epochs
-        if i%2==0 and i!=0:
-            #Sampling and Visualizing x and y
-            samples_x,samples_y = model_joint.sample(n=4)  
-            plot_1xn(samples_x, r"Samples $x \sim P(X)$")
-            plt.savefig('sampling_figures/Unconditional_X_epoch{0:02d}'.format(i))
-            plt.clf()
-            plot_1xn(samples_y, r"Samples $y \sim P(Y)$")
-            plt.savefig('sampling_figures/Unconditional_Y_epoch{0:02d}'.format(i))
-            plt.clf()
-            x_t, y_t = next(dl.test_ds_paired.__iter__())
-            
-            # Conditional Sampling
-            xp_t = model_joint.predict_x(y_t)                
-            yp_t = model_joint.predict_y(x_t)
-            # Visualizing Inputs & Outputs
-            plot_1xn([x_t[0], y_t[0], xp_t[0], yp_t[0]], r"Predictions $X \leftrightarrow Y$")
-            plt.savefig('sampling_figures/Conditional_epoch{0:02d}'.format(i))
-            plt.clf()
+        #Sampling and Visualizing x and y
+        samples_x,samples_y = model_joint.sample(n=4)  
+        plot_1xn(samples_x, r"Samples $x \sim P(X)$", save='sampling_figures/Unconditional_X_epoch{0:02d}'.format(i))
+        plot_1xn(samples_y, r"Samples $y \sim P(Y)$", save='sampling_figures/Unconditional_Y_epoch{0:02d}'.format(i))
+        x_t, y_t = next(dl.test_ds_paired.__iter__())
+        
+        # Conditional Sampling
+        xp_t = model_joint.predict_x(y_t)                
+        yp_t = model_joint.predict_y(x_t)
+        # Visualizing Inputs & Outputs
+        plot_1xn([x_t[0], y_t[0], xp_t[0], yp_t[0]], r"Predictions $X \leftrightarrow Y$", save='sampling_figures/Conditional_epoch{0:02d}'.format(i))
         
         # # Saving the model
         # model_joint.save(f'model_checkpoints/jflvm_checkpoint')
@@ -279,7 +300,7 @@ def main():
         #valid_mse = (tf.keras.metrics.mean_squared_error(y_true, y_pred))
         mse = tf.keras.losses.MeanSquaredError()
         valid_mse = mse(y_true,y_pred).numpy()
-        #print(valid_mse)
+        print(valid_mse)
         # computing climdex indices
         valid_txx_bias, valid_txn_bias = eval_climdex(np.squeeze(y_true.numpy()), np.squeeze(y_pred.numpy()), dl.zarr_hr_valid.coords)
         valid_txx_bias_mean, valid_txx_bias_std = valid_txx_bias.mean().values, valid_txx_bias.std().values
@@ -314,9 +335,19 @@ def main():
     y_true = tf.concat(y_true, axis=0)
     y_pred = tf.concat(y_pred, axis=0)
 
-    # saving test y_pred and y_true as backup
-    np.save('test_y_true.npy', y_true.numpy())
-    np.save('test_y_pred.npy', y_pred.numpy())
+
+    # converting the preds and trues to zarr with original coords
+    zarr_test_y_pred = xr.Dataset(data_vars={'t2m':(["date", "lat", "lon"], y_pred.numpy().squeeze())}, coords=dl.zarr_hr_test.coords)
+    zarr_test_y_true = xr.Dataset(data_vars={'t2m':(["date", "lat", "lon"], y_true.numpy().squeeze())}, coords=dl.zarr_hr_test.coords)
+    assert zarr_test_y_true.equals(dl.zarr_hr_test)
+
+    # # destandaridize
+    # zarr_test_y_pred = destandardize(zarr_test_y_pred, dl.means, dl.std)
+    # zarr_test_y_true = destandardize(zarr_test_y_true, dl.means, dl.std)
+
+    # saving them
+    zarr_test_y_pred.to_zarr('test_hr_pred_epoch{0:02d}.zarr'.format(i))
+    zarr_test_y_true.to_zarr('test_hr_true_epoch{0:02d}.zarr'.format(i))
 
     # computing climdex indices
     test_txx_bias, test_txn_bias = eval_climdex(np.squeeze(y_true.numpy()), np.squeeze(y_pred.numpy()), dl.zarr_hr_test.coords)
