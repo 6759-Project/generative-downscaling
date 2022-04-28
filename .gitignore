@@ -112,5 +112,9 @@ mlruns/
 # result folder
 final_model/
 
-# wand logging
+# logging
 wandb/
+sampling_figures/
+model_checkpoints/
+test_y_pred.npy
+test_y_true.npy
