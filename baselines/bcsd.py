@@ -20,32 +20,47 @@ class QuantileMap:
         x : input x tensor
         y : input y tensor
         """
-        x_quantiles = tfp.stats.quantiles(x, self.num_quantiles, axis=self.axis, interpolation=self.interp, keep_dims=True)
-        y_quantiles = tfp.stats.quantiles(y, self.num_quantiles, axis=self.axis, interpolation=self.interp, keep_dims=True)
+        x_quantiles = tfp.stats.quantiles(x, self.num_quantiles, axis=self.axis, interpolation=self.interp, keepdims=True)
+        y_quantiles = tfp.stats.quantiles(y, self.num_quantiles, axis=self.axis, interpolation=self.interp, keepdims=True)
         # move quantiles to last axis
         dims = list(range(len(x.shape)+1))
         self.x_quantiles = tf.transpose(x_quantiles, perm=dims[1:] + dims[:1])
         self.y_quantiles = tf.transpose(y_quantiles, perm=dims[1:] + dims[:1])
         return self
 
-    @tf.function
+    # @tf.function
+    # def predict(self, x, batch_size=1):
+    #     # define nested predict function to apply to each batch element
+    #     def _predict(x):
+    #         # compute argmin to find closest x (model) quantile
+    #         x_inds = tf.math.argmin(tf.math.abs(x - self.x_quantiles), axis=-1)
+    #         # increase index rank by 1
+    #         x_inds = tf.expand_dims(x_inds, axis=-1)
+    #         # use gather to select mapped quantiles from y (observed);
+    #         # batch_dims is set to the rank of x - 1 to index only the quantiles axis
+    #         x_mapped = tf.gather(self.y_quantiles, x_inds, axis=-1, batch_dims=len(x_inds.shape)-1)
+    #         # squeeze first (batch) and last (quantile) dims to get correct output dimensions
+    #         return tf.squeeze(x_mapped, axis=[0,-1])
+    #     x_ = tf.expand_dims(x, axis=-1)
+    #     res = tf.map_fn(_predict, x_, parallel_iterations=batch_size)
+    #     assert res.shape == x.shape, f'expected {x.shape} but got: {res.shape}'
+    #     return res
+
     def predict(self, x, batch_size=1):
-        # define nested predict function to apply to each batch element
-        def _predict(x):
-            # compute argmin to find closest x (model) quantile
-            x_inds = tf.math.argmin(tf.math.abs(x - self.x_quantiles), axis=-1)
-            # increase index rank by 1
-            x_inds = tf.expand_dims(x_inds, axis=-1)
-            # use gather to select mapped quantiles from y (observed);
-            # batch_dims is set to the rank of x - 1 to index only the quantiles axis
-            x_mapped = tf.gather(self.y_quantiles, x_inds, axis=-1, batch_dims=len(x_inds.shape)-1)
-            # squeeze first (batch) and last (quantile) dims to get correct output dimensions
-            return tf.squeeze(x_mapped, axis=[0,-1])
         x_ = tf.expand_dims(x, axis=-1)
-        res = tf.map_fn(_predict, x_, parallel_iterations=batch_size)
+        # compute argmin to find closest x (model) quantile
+        x_inds = tf.math.argmin(tf.math.abs(x_ - self.x_quantiles), axis=-1)
+        # increase index rank by 1
+        x_inds = tf.expand_dims(x_inds, axis=-1)
+        # use gather to select mapped quantiles from y (observed);
+        # batch_dims is set to the rank of x - 1 to index only the quantiles axis
+        x_mapped = tf.gather(self.y_quantiles, x_inds, axis=-1, batch_dims=len(x_inds.shape)-1)
+        # squeeze first (batch) and last (quantile) dims to get correct output dimensions
+        res = tf.squeeze(x_mapped, axis=[-1])
+
         assert res.shape == x.shape, f'expected {x.shape} but got: {res.shape}'
         return res
-    
+
 class BCSD:
     """
     GPU-accelerated implementation of bias-correction spatial-disaggregation (BCSD).
@@ -88,8 +103,8 @@ class BCSD:
             qmap = QuantileMap(num_quantiles=self.n_quantiles)
             qmap.fit(x, y)
             self.qmaps[day] = qmap
-            y_interp = tf.image.resize(y, (obsv.lat.size, obsv.lon.size), method=self.interp)
-            y_interp = xr.DataArray(y_interp, coords=obsv_sub.coords, dims=obsv_sub.dims)
+            y_interp = tf.image.resize(tf.expand_dims(y, -1), [obsv.lat.size, obsv.lon.size], method=self.interp)
+            y_interp = xr.DataArray(tf.squeeze(y_interp), coords=obsv_sub.coords, dims=obsv_sub.dims)
             y_interp_curr = y_interp[y_interp[f'{self.time_dim}.dayofyear'] == day]
             y_obs_curr = obsv_sub[obsv_sub[f'{self.time_dim}.dayofyear'] == day]
             y_interp_dayavg = y_interp_curr.mean(dim=self.time_dim)
@@ -105,8 +120,8 @@ class BCSD:
         y_pred_per_day = []
         for day, lr_day in tqdm(lr.groupby(f'{self.time_dim}.dayofyear'), total=N_days, desc='bcsd pred'):
             lr_mapped = self.qmaps[day].predict(lr_day.values)
-            lr_mapped_interp = tf.image.resize(lr_mapped, (hr_lat, hr_lon), method=self.interp)
-            lr_mapped_interp = xr.DataArray(lr_mapped_interp.numpy(),
+            lr_mapped_interp = tf.image.resize(tf.expand_dims(lr_mapped, -1), (hr_lat, hr_lon), method=self.interp)
+            lr_mapped_interp = xr.DataArray(tf.squeeze(lr_mapped_interp, -1).numpy(),
                                             coords={self.time_dim: lr_day[self.time_dim],
                                                     'lat': self.hr_coords['lat'],
                                                     'lon': self.hr_coords['lon']},

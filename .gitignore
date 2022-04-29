@@ -112,3 +112,7 @@ mlruns/
 # 6759-proj
 wandb/
 final_model/
+model_checkpoints/
+sampling_figures/
+test_y_pred.npy
+test_y_true.npy

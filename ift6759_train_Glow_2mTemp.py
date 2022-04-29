@@ -4,6 +4,7 @@ import tensorflow as tf
 import datetime
 import wandb
 import os
+import time
 
 # to install climdex:
 # python -m pip install git+https://github.com/bgroenks96/pyclimdex.git
@@ -29,8 +30,16 @@ from utils.distributions import normal
 from tensorflow.keras.optimizers import Adamax
 import matplotlib.pyplot as plt
 
-#wandb.init(project="Train-Glow-2mTemp", entity="6759-proj")
-wandb.init(project="Train-Glow-2mTemp")
+def standardize(zarr_coarse, zarr_fine):
+    daily_means = zarr_coarse.groupby("date.month").mean()
+    daily_std = zarr_coarse.groupby("date.month").std()
+    coarse_standardized = (zarr_coarse - daily_means) / daily_std
+    fine_standardized = (zarr_fine - daily_means) / daily_std
+    return coarse_standardized, fine_standardized, daily_means, daily_std
+
+def destandardize(zarr, mean, std):
+    zarr_destandardized = (zarr * std) + mean
+    return zarr_destandardized
 
 def upsample(new_wt, new_ht, method, scale_factor=1):
     @tf.function
@@ -38,11 +47,14 @@ def upsample(new_wt, new_ht, method, scale_factor=1):
         return tf.image.resize(x, (new_wt,new_ht), method=method) / scale_factor
     return _upsample
 
-def preprocess_vds(data_lo, data_hi, batch_size=100, buffer_size=1000, supervised=True):
-    if supervised:
-        data = tf.data.Dataset.zip((data_lo, data_hi)).shuffle(buffer_size)
+def preprocess_vds(data_lo, data_hi, batch_size=100, buffer_size=1000, supervised=True, shuffle=True):
+    if not shuffle:
+        data = tf.data.Dataset.zip((data_lo, data_hi))
     else:
-        data = tf.data.Dataset.zip((data_lo.shuffle(buffer_size), data_hi.shuffle(buffer_size)))
+        if supervised:
+            data = tf.data.Dataset.zip((data_lo, data_hi)).shuffle(buffer_size)
+        else:
+            data = tf.data.Dataset.zip((data_lo.shuffle(buffer_size), data_hi.shuffle(buffer_size)))
     return data.batch(batch_size)
 
 indices = tdex.indices('date')
@@ -70,163 +82,252 @@ def spatial_mae(scale, stride=1):
     return _spatial_mse
 
 #Function for visualizing our samples
-def plot_1xn(data, titles, cmin=-10., cmax=10.):
+def plot_1xn(data, titles, cmin=-10., cmax=10., save=None):
     n = len(data)
-    plt.figure(figsize=(n*9,6))
+    fig = plt.figure(figsize=(n*9,6))
     for i in range(n):
         plt.subplot(1,n,i+1)
         plt.imshow(data[i].numpy().squeeze(), origin='lower')
         plt.colorbar(pad=0.04, shrink=0.5)
     plt.suptitle(titles, y=0.85)
-    plt.show()
+    if save is not None: fig.savefig(save)
+    fig.clf()
 
-# load the data
-zarr_lr = xr.open_zarr('data/processed/temp/5625/temp_5625_processed.zarr')
-zarr_hr = xr.open_zarr('data/processed/temp/1406/temp_1406_processed.zarr')
+class DataLoaderTemp:
+    def __init__(
+        self,
+        path_lr='data/processed/temp/5625/temp_5625_processed.zarr',
+        path_hr='data/processed/temp/1406/temp_1406_processed.zarr',
+        n_total=None,
+        batch_size=10,
+        custom_standardize=False,
+        supervised_training=False
+    ):
+        # load the data
+        zarr_lr = xr.open_zarr(path_lr)
+        zarr_hr = xr.open_zarr(path_hr)
+        
+        if custom_standardize:
+            zarr_lr, zarr_hr, self.means, self.std = standardize(zarr_lr, zarr_hr)
+        else:
+            # just center it to zero
+            zarr_lr, monthly_means_lr = remove_monthly_means(zarr_lr, time_dim='date')
+            zarr_hr, monthly_means_hr = remove_monthly_means(zarr_hr, time_dim='date')
+        
 
-# center it to zero
-zarr_lr, monthly_means_lr = remove_monthly_means(zarr_lr, time_dim='date')
-zarr_hr, monthly_means_hr = remove_monthly_means(zarr_hr, time_dim='date')
+        # train and test split the zarr arrays
+        assert len(zarr_hr.date)==len(zarr_lr.date)
 
-# train and test split the zarr arrays
-assert len(zarr_hr.date)==len(zarr_lr.date)
+        if n_total is None: n_total = len(zarr_hr.date)
+        print('n_total:', n_total)
+        n_train = int(0.7*n_total)
+        n_valid = int(0.2*n_total)
+        n_test = n_total-n_train-n_valid
 
-n_total = len(zarr_hr.date) # uncomment this to run on full dataset
-n_train = int(0.7*n_total)
-n_valid = int(0.2*n_total)
-n_test = n_total-n_train-n_valid
+        zarr_lr_train = zarr_lr.isel(date=slice(0, n_train))
+        zarr_hr_train = zarr_hr.isel(date=slice(0, n_train))
+
+        zarr_lr_valid = zarr_lr.isel(date=slice(n_train, n_train+n_valid))
+        zarr_hr_valid = zarr_hr.isel(date=slice(n_train, n_train+n_valid))
+
+        zarr_lr_test = zarr_lr.isel(date=slice(n_train+n_valid, n_train+n_valid+n_test))
+        zarr_hr_test = zarr_hr.isel(date=slice(n_train+n_valid, n_train+n_valid+n_test))
+
+        # make data numpy arrays (unsuited for large data):
+        # each ndarray have shape [date, lat, lon]
+        ndarray_lr_train = zarr_lr_train.to_array().to_numpy().squeeze()
+        ndarray_hr_train = zarr_hr_train.to_array().to_numpy().squeeze()
+
+        ndarray_lr_valid = zarr_lr_valid.to_array().to_numpy().squeeze()
+        ndarray_hr_valid = zarr_hr_valid.to_array().to_numpy().squeeze()
+
+        ndarray_lr_test = zarr_lr_test.to_array().to_numpy().squeeze()
+        ndarray_hr_test = zarr_hr_test.to_array().to_numpy().squeeze()
+
+        # defining tensorflow datasets
+        # this batches the data along the date axis to yield
+        # n_total samples of shape [lat, lon]
+        # We keep the last eighth of the sample for test set.
+        dataset_train_lr = tf.data.Dataset.from_tensor_slices(ndarray_lr_train)
+        dataset_train_hr = tf.data.Dataset.from_tensor_slices(ndarray_hr_train)
+
+        dataset_valid_lr = tf.data.Dataset.from_tensor_slices(ndarray_lr_valid)
+        dataset_valid_hr = tf.data.Dataset.from_tensor_slices(ndarray_hr_valid)
+
+        dataset_test_lr = tf.data.Dataset.from_tensor_slices(ndarray_lr_test)
+        dataset_test_hr = tf.data.Dataset.from_tensor_slices(ndarray_hr_test)
+
+        # We need to naively upsample the low res data so it has the same
+        # dimensionality as the high res using the nearest neighbour algo
+        # We first add a channel to all images
+        dataset_train_lr = dataset_train_lr.map(lambda x: x[:,:,None])
+        dataset_train_hr = dataset_train_hr.map(lambda x: x[:,:,None])
+
+        dataset_valid_lr = dataset_valid_lr.map(lambda x: x[:,:,None])
+        dataset_valid_hr = dataset_valid_hr.map(lambda x: x[:,:,None])
+
+        dataset_test_lr = dataset_test_lr.map(lambda x: x[:,:,None])
+        dataset_test_hr = dataset_test_hr.map(lambda x: x[:,:,None])
+
+        # import ipdb;ipdb.set_trace()
+        # Then upsample the low res datasets
+        lat_hr, lon_hr = ndarray_hr_train.shape[1:]
+        dataset_train_lr = dataset_train_lr.map(upsample(lat_hr, lon_hr, tf.image.ResizeMethod.NEAREST_NEIGHBOR))
+        dataset_valid_lr = dataset_valid_lr.map(upsample(lat_hr, lon_hr, tf.image.ResizeMethod.NEAREST_NEIGHBOR))
+        dataset_test_lr = dataset_test_lr.map(upsample(lat_hr, lon_hr, tf.image.ResizeMethod.NEAREST_NEIGHBOR))
+        #import ipdb; ipdb.set_trace()
+
+        # zipping the data together and shuffling each dataset individually
+        # for "unsupervised learning"
+        train_ds = preprocess_vds(dataset_train_lr, dataset_train_hr, batch_size=batch_size, buffer_size=n_train, supervised=supervised_training)
+        valid_ds = preprocess_vds(dataset_valid_lr, dataset_valid_hr, batch_size=batch_size, buffer_size=n_valid, supervised=supervised_training)
+        valid_ds_paired = preprocess_vds(dataset_valid_lr, dataset_valid_hr, batch_size=100, buffer_size=n_valid, supervised=True, shuffle=False)
+        test_ds = preprocess_vds(dataset_test_lr, dataset_test_hr, batch_size=batch_size, buffer_size=n_test, supervised=supervised_training)
+        test_ds_paired = preprocess_vds(dataset_test_lr, dataset_test_hr, batch_size=100, buffer_size=n_test, supervised=True, shuffle=False)
+
+        scale = ndarray_hr_train.shape[1] // ndarray_lr_train.shape[1]
+
+        # Setting attributes
+        self.zarr_lr_train = zarr_lr_train
+        self.zarr_lr_valid = zarr_lr_valid
+        self.zarr_lr_test = zarr_lr_test
+        self.zarr_hr_train = zarr_hr_train
+        self.zarr_hr_valid = zarr_hr_valid
+        self.zarr_hr_test = zarr_hr_test
+        self.train_ds = train_ds
+        self.valid_ds = valid_ds
+        self.valid_ds_paired = valid_ds_paired
+        self.test_ds = test_ds
+        self.test_ds_paired = test_ds_paired
+        self.n_total = n_total
+        self.n_train = n_train
+        self.n_valid = n_valid
+        self.n_test = n_test
+        self.lon_hr = lon_hr
+        self.lat_hr = lat_hr
+        self.scale = scale
+        self.monthly_means_lr = monthly_means_lr
+        self.monthly_means_hr = monthly_means_hr
+        self.custom_standardize = custom_standardize
 
 
-zarr_lr_train = zarr_lr.isel(date=slice(0, n_train))
-zarr_hr_train = zarr_hr.isel(date=slice(0, n_train))
 
-zarr_lr_valid = zarr_lr.isel(date=slice(n_train, n_train+n_valid))
-zarr_hr_valid = zarr_hr.isel(date=slice(n_train, n_train+n_valid))
+def main():
+    # launching wandb
+    wandb.init(project="Train-Glow-2mTemp")
 
-zarr_lr_test = zarr_lr.isel(date=slice(n_train+n_valid, n_train+n_valid+n_test))
-zarr_hr_test = zarr_hr.isel(date=slice(n_train+n_valid, n_train+n_valid+n_test))
-
-# make data numpy arrays (unsuited for large data):
-# each ndarray have shape [date, lat, lon]
-ndarray_lr_train = zarr_lr_train.to_array().to_numpy().squeeze()
-ndarray_hr_train = zarr_hr_train.to_array().to_numpy().squeeze()
-
-ndarray_lr_valid = zarr_lr_valid.to_array().to_numpy().squeeze()
-ndarray_hr_valid = zarr_hr_valid.to_array().to_numpy().squeeze()
-
-ndarray_lr_test = zarr_lr_test.to_array().to_numpy().squeeze()
-ndarray_hr_test = zarr_hr_test.to_array().to_numpy().squeeze()
-
-# defining tensorflow datasets
-# this batches the data along the date axis to yield
-# n_total samples of shape [lat, lon]
-# We keep the last eighth of the sample for test set.
-print(ndarray_hr_train.shape)
-dataset_train_lr = tf.data.Dataset.from_tensor_slices(ndarray_lr_train)
-dataset_train_hr = tf.data.Dataset.from_tensor_slices(ndarray_hr_train)
-
-dataset_valid_lr = tf.data.Dataset.from_tensor_slices(ndarray_lr_valid)
-dataset_valid_hr = tf.data.Dataset.from_tensor_slices(ndarray_hr_valid)
-
-dataset_test_lr = tf.data.Dataset.from_tensor_slices(ndarray_lr_test)
-dataset_test_hr = tf.data.Dataset.from_tensor_slices(ndarray_hr_test)
-
-# We need to naively upsample the low res data so it has the same
-# dimensionality as the high res using the nearest neighbour algo
-# We first add a channel to all images
-dataset_train_lr = dataset_train_lr.map(lambda x: x[:,:,None])
-dataset_train_hr = dataset_train_hr.map(lambda x: x[:,:,None])
-
-dataset_valid_lr = dataset_valid_lr.map(lambda x: x[:,:,None])
-dataset_valid_hr = dataset_valid_hr.map(lambda x: x[:,:,None])
-
-dataset_test_lr = dataset_test_lr.map(lambda x: x[:,:,None])
-dataset_test_hr = dataset_test_hr.map(lambda x: x[:,:,None])
-
-# import ipdb;ipdb.set_trace()
-# Then upsample the low res datasets
-lat_hr, lon_hr = ndarray_hr_train.shape[1:]
-dataset_train_lr = dataset_train_lr.map(upsample(lat_hr, lon_hr, tf.image.ResizeMethod.NEAREST_NEIGHBOR))
-dataset_valid_lr = dataset_valid_lr.map(upsample(lat_hr, lon_hr, tf.image.ResizeMethod.NEAREST_NEIGHBOR))
-dataset_test_lr = dataset_test_lr.map(upsample(lat_hr, lon_hr, tf.image.ResizeMethod.NEAREST_NEIGHBOR))
-#import ipdb; ipdb.set_trace()
-
-# zipping the data together and shuffling each dataset individually
-# for "unsupervised learning"
-train_ds = preprocess_vds(dataset_train_lr, dataset_train_hr, batch_size=10, buffer_size=n_train, supervised=False)
-valid_ds = preprocess_vds(dataset_valid_lr, dataset_valid_hr, batch_size=10, buffer_size=n_valid, supervised=False)
-test_ds = preprocess_vds(dataset_test_lr, dataset_test_hr, batch_size=10, buffer_size=n_test, supervised=False)
-test_ds_paired = preprocess_vds(dataset_test_lr, dataset_test_hr, batch_size=1, buffer_size=n_test, supervised=True)
-
-flow_hr = Invert(GlowFlow(num_layers=3, depth=8, coupling_nn_ctor=coupling_nn_glow(max_filters=256), name='glow_hr'))
-flow_lr = Invert(GlowFlow(num_layers=3, depth=8, coupling_nn_ctor=coupling_nn_glow(max_filters=256), name='glow_lr'))
-
-scale = ndarray_hr_train.shape[1] // ndarray_lr_train.shape[1]
-dx = adversarial.PatchDiscriminator((lat_hr, lon_hr,1))
-dy = adversarial.PatchDiscriminator((lat_hr, lon_hr,1))
-model_joint = JointFlowLVM(flow_lr, flow_hr, dx, dy,
-                            Gx_aux_loss=spatial_mae(scale, stride=scale),
-                            Gy_aux_loss=spatial_mae(scale),
-                            input_shape=(None,lat_hr, lon_hr,1))
-
-# these are all args in his fit_glow_jflvm() function from glow-downscaling-maxt.ipynb
-validate_freq=1
-warmup=1
-sample_batch_size=10
-load_batch_size=1200
-layers=4
-depth=8
-min_filters=32
-max_filters=256
-lam=1.0
-lam_decay=0.01
-alpha=1.0
-n_epochs=10
-
-wandb.config.update({'validate_freq':validate_freq,
-                'warmup':warmup,
-                'sample_batch_size':sample_batch_size,
-                'load_batch_size':load_batch_size,
-                'layers':layers,
-                'depth':depth,
-                'min_filters':min_filters,
-                'max_filters':max_filters,
-                'lam':lam,
-                'lam_decay':lam_decay,
-                'alpha':alpha,
-                'n_epochs':n_epochs})
-
-for i in range(n_epochs):
-    # training
-    print(f'Training joint model for {validate_freq} epochs ({i}/{n_epochs} complete)', flush=True)
-    #model_joint.load_weights('model_checkpoints/test_jflvm_checkpoint')
-    train_metrics = model_joint.train(train_ds, steps_per_epoch=n_train//sample_batch_size, num_epochs=validate_freq,lam=lam-lam_decay*validate_freq*i, lam_decay=lam_decay, alpha=alpha)
-
-    # evaluation
-    valid_eval_metrics = model_joint.evaluate(valid_ds, n_valid//sample_batch_size)
-    test_eval_metrics = model_joint.evaluate(test_ds, n_test//sample_batch_size)
+    # these are all args in his fit_glow_jflvm() function from glow-downscaling-maxt.ipynb
+    validate_freq=1
+    warmup=1
+    sample_batch_size=10
+    load_batch_size=1200
+    layers=4
+    depth=8
+    min_filters=32
+    max_filters=256
+    lam=1.0
+    lam_decay=0.01
+    alpha=1.0
+    n_epochs=20
+    custom_standardize=False
+    supervised_training=True
     
-    # Sampling and Visualizing for every 3 epochs
-    if i%3==0 and i!=0:
+
+    wandb.config.update({'validate_freq':validate_freq,
+                    'warmup':warmup,
+                    'sample_batch_size':sample_batch_size,
+                    'load_batch_size':load_batch_size,
+                    'layers':layers,
+                    'depth':depth,
+                    'min_filters':min_filters,
+                    'max_filters':max_filters,
+                    'lam':lam,
+                    'lam_decay':lam_decay,
+                    'alpha':alpha,
+                    'n_epochs':n_epochs,
+                    'custom_standardize':custom_standardize,
+                    'supervised_training': supervised_training})
+
+    dl = DataLoaderTemp(batch_size=sample_batch_size, custom_standardize=custom_standardize, supervised_training=supervised_training)
+
+    flow_hr = Invert(GlowFlow(num_layers=layers, depth=depth, coupling_nn_ctor=coupling_nn_glow(max_filters=max_filters), name='glow_hr'))
+    flow_lr = Invert(GlowFlow(num_layers=layers, depth=depth, coupling_nn_ctor=coupling_nn_glow(max_filters=max_filters), name='glow_lr'))
+
+
+    dx = adversarial.PatchDiscriminator((dl.lat_hr, dl.lon_hr,1))
+    dy = adversarial.PatchDiscriminator((dl.lat_hr, dl.lon_hr,1))
+    model_joint = JointFlowLVM(flow_lr, flow_hr, dx, dy,
+                                Gx_aux_loss=spatial_mae(dl.scale, stride=dl.scale),
+                                Gy_aux_loss=spatial_mae(dl.scale),
+                                input_shape=(None, dl.lat_hr, dl.lon_hr, 1))
+    
+    start_time = time.time()
+    for i in range(n_epochs):
+        # training
+        print(f'Training joint model for {validate_freq} epochs ({i}/{n_epochs} complete)', flush=True)
+        #model_joint.load_weights('model_checkpoints/test_jflvm_checkpoint')
+        train_metrics = model_joint.train(dl.train_ds, steps_per_epoch=dl.n_train//sample_batch_size, num_epochs=validate_freq, lam=lam-lam_decay*validate_freq*i, lam_decay=lam_decay, alpha=alpha)
+
+        # evaluation
+        valid_eval_metrics = model_joint.evaluate(dl.valid_ds, dl.n_valid//sample_batch_size)
+        
         #Sampling and Visualizing x and y
         samples_x,samples_y = model_joint.sample(n=4)  
-        plot_1xn(samples_x, r"Samples $x \sim P(X)$")  
-        plot_1xn(samples_y, r"Samples $y \sim P(Y)$")  
-        x_t, y_t = next(test_ds_paired.__iter__())
+        plot_1xn(samples_x, r"Samples $x \sim P(X)$", save='sampling_figures/Unconditional_X_epoch{0:02d}'.format(i))
+        plot_1xn(samples_y, r"Samples $y \sim P(Y)$", save='sampling_figures/Unconditional_Y_epoch{0:02d}'.format(i))
+        x_t, y_t = next(dl.test_ds_paired.__iter__())
         
         # Conditional Sampling
         xp_t = model_joint.predict_x(y_t)                
         yp_t = model_joint.predict_y(x_t)
         # Visualizing Inputs & Outputs
-        plot_1xn([x_t[0], y_t[0], xp_t[0], yp_t[0]], r"Predictions $X \leftrightarrow Y$") 
-    
-    #Saving the model
-    model_joint.save('model_checkpoints/test_jflvm_checkpoint')
-    
-    # climdex
-    print('Evaluating valid set ClimDEX indices on predictions')
+        plot_1xn([x_t[0], y_t[0], xp_t[0], yp_t[0]], r"Predictions $X \leftrightarrow Y$", save='sampling_figures/Conditional_epoch{0:02d}'.format(i))
+        
+        # # Saving the model
+        # model_joint.save(f'model_checkpoints/jflvm_checkpoint')
+        
+        # climdex
+        print('Evaluating valid set ClimDEX indices on predictions')
+        y_true, y_pred = [], []
+        for x, y in dl.valid_ds_paired:
+            y_true.append(y)
+            z, ildj = model_joint.G_zx.inverse(x)
+            y_, fldj = model_joint.G_zy.forward(z)
+            y_pred.append(y_)
+        y_true = tf.concat(y_true, axis=0)
+        y_pred = tf.concat(y_pred, axis=0)
+
+        #valid_mse = (tf.keras.metrics.mean_squared_error(y_true, y_pred))
+        mse = tf.keras.losses.MeanSquaredError()
+        valid_mse = mse(y_true,y_pred).numpy()
+        print(valid_mse)
+        # computing climdex indices
+        valid_txx_bias, valid_txn_bias = eval_climdex(np.squeeze(y_true.numpy()), np.squeeze(y_pred.numpy()), dl.zarr_hr_valid.coords)
+        valid_txx_bias_mean, valid_txx_bias_std = valid_txx_bias.mean().values, valid_txx_bias.std().values
+        valid_txn_bias_mean, valid_txn_bias_std = valid_txn_bias.mean().values, valid_txn_bias.std().values
+        print('valid_mse:'+str(valid_mse))
+        # printing climdex indices
+        print('valid txx_bias_mean, valid txx_bias_std:', valid_txx_bias_mean, valid_txx_bias_std)
+        print('valid txn_bias_mean, valid txn_bias_std:', valid_txn_bias_mean, valid_txn_bias_std)
+
+        # logging losses, metrics in WandB
+        for key, value in train_metrics.items():
+            wandb.log({'train_'+key: value[0]}, step=i)
+        for key, value in valid_eval_metrics.items():
+            wandb.log({'valid_eval_'+key: value[0]}, step=i)
+        # logging climdex indices in WandB
+        wandb.log({'valid_mse':valid_mse}, step=i)
+        wandb.log({'valid_txx_bias_mean':valid_txx_bias_mean}, step=i)
+        wandb.log({'valid_txx_bias_std':valid_txx_bias_std}, step=i)
+        wandb.log({'valid_txn_bias_mean':valid_txn_bias_mean}, step=i)
+        wandb.log({'valid_txn_bias_std':valid_txn_bias_std}, step=i)
+        
+    #Test set evaluation
+    test_eval_metrics = model_joint.evaluate(dl.test_ds, dl.n_test//sample_batch_size)
+
+    print('Evaluating Test ClimDEX indices on predictions')
     y_true, y_pred = [], []
-    for x, y in tf.data.Dataset.zip((dataset_valid_lr, dataset_valid_hr)).batch(2*sample_batch_size):
+    for x, y in dl.test_ds_paired:
         y_true.append(y)
         z, ildj = model_joint.G_zx.inverse(x)
         y_, fldj = model_joint.G_zy.forward(z)
@@ -234,64 +335,45 @@ for i in range(n_epochs):
     y_true = tf.concat(y_true, axis=0)
     y_pred = tf.concat(y_pred, axis=0)
 
-    #valid_mse = (tf.keras.metrics.mean_squared_error(y_true, y_pred))
-    mse = tf.keras.losses.MeanSquaredError()
-    valid_mse = mse(y_true,y_pred).numpy()
-    #print(valid_mse)
+
+    # converting the preds and trues to zarr with original coords
+    zarr_test_y_pred = xr.Dataset(data_vars={'t2m':(["date", "lat", "lon"], y_pred.numpy().squeeze())}, coords=dl.zarr_hr_test.coords)
+    zarr_test_y_true = xr.Dataset(data_vars={'t2m':(["date", "lat", "lon"], y_true.numpy().squeeze())}, coords=dl.zarr_hr_test.coords)
+    assert zarr_test_y_true.equals(dl.zarr_hr_test)
+
+    # # destandaridize
+    # zarr_test_y_pred = destandardize(zarr_test_y_pred, dl.means, dl.std)
+    # zarr_test_y_true = destandardize(zarr_test_y_true, dl.means, dl.std)
+
+    # saving them
+    zarr_test_y_pred.to_zarr('test_hr_pred_epoch{0:02d}.zarr'.format(i))
+    zarr_test_y_true.to_zarr('test_hr_true_epoch{0:02d}.zarr'.format(i))
+
     # computing climdex indices
-    valid_txx_bias, valid_txn_bias = eval_climdex(np.squeeze(y_true.numpy()), np.squeeze(y_pred.numpy()), zarr_hr_valid.coords)
-    valid_txx_bias_mean, valid_txx_bias_std = valid_txx_bias.mean().values, valid_txx_bias.std().values
-    valid_txn_bias_mean, valid_txn_bias_std = valid_txn_bias.mean().values, valid_txn_bias.std().values
-    print('valid_mse:'+str(valid_mse))
+    test_txx_bias, test_txn_bias = eval_climdex(np.squeeze(y_true.numpy()), np.squeeze(y_pred.numpy()), dl.zarr_hr_test.coords)
+    test_txx_bias_mean, test_txx_bias_std = test_txx_bias.mean().values, test_txx_bias.std().values
+    test_txn_bias_mean, test_txn_bias_std = test_txn_bias.mean().values, test_txn_bias.std().values
+
     # printing climdex indices
-    print('valid txx_bias_mean, valid txx_bias_std:', valid_txx_bias_mean, valid_txx_bias_std)
-    print('valid txn_bias_mean, valid txn_bias_std:', valid_txn_bias_mean, valid_txn_bias_std)
+    print('test_txx_bias_mean, test_txx_bias_std:', test_txx_bias_mean, test_txx_bias_std)
+    print('test_txn_bias_mean, test_txn_bias_std:', test_txn_bias_mean, test_txn_bias_std)
+
+    total_training_time = time.time() - start_time
+    print('total training time:', total_training_time)
 
     # logging losses, metrics in WandB
-    for key, value in train_metrics.items():
-        wandb.log({'train_'+key: value[0]}, step=i)
-    for key, value in valid_eval_metrics.items():
-        wandb.log({'valid_eval_'+key: value[0]}, step=i)
-    # logging climdex indices in WandB
-    wandb.log({'valid_mse':valid_mse}, step=i)
-    wandb.log({'valid_txx_bias_mean':valid_txx_bias_mean}, step=i)
-    wandb.log({'valid_txx_bias_std':valid_txx_bias_std}, step=i)
-    wandb.log({'valid_txn_bias_mean':valid_txn_bias_mean}, step=i)
-    wandb.log({'valid_txn_bias_std':valid_txn_bias_std}, step=i)
-    
-#Test set evaluation
-print('Evaluating Test ClimDEX indices on predictions')
-y_true, y_pred = [], []
-for x, y in tf.data.Dataset.zip((dataset_test_lr, dataset_test_hr)).batch(2*sample_batch_size):
-    y_true.append(y)
-    z, ildj = model_joint.G_zx.inverse(x)
-    y_, fldj = model_joint.G_zy.forward(z)
-    y_pred.append(y_)
-y_true = tf.concat(y_true, axis=0)
-y_pred = tf.concat(y_pred, axis=0)
+    for key, value in test_eval_metrics.items():
+        wandb.log({'test_eval_'+key: value[0]}, step=i)
+        # logging climdex indices in WandB
+    wandb.log({'test_txx_bias_mean':test_txx_bias_mean}, step=i)
+    wandb.log({'test_txx_bias_std':test_txx_bias_std}, step=i)
+    wandb.log({'test_txn_bias_mean':test_txn_bias_mean}, step=i)
+    wandb.log({'test_txn_bias_std':test_txn_bias_std}, step=i)
+    wandb.log({'total_training_time':total_training_time}, step=i)
 
-# computing climdex indices
-test_txx_bias, test_txn_bias = eval_climdex(np.squeeze(y_true.numpy()), np.squeeze(y_pred.numpy()), zarr_hr_test.coords)
-test_txx_bias_mean, test_txx_bias_std = test_txx_bias.mean().values, test_txx_bias.std().values
-test_txn_bias_mean, test_txn_bias_std = test_txn_bias.mean().values, test_txn_bias.std().values
-
-# printing climdex indices
-print('test_txx_bias_mean, test_txx_bias_std:', test_txx_bias_mean, test_txx_bias_std)
-print('test_txn_bias_mean, test_txn_bias_std:', test_txn_bias_mean, test_txn_bias_std)
-
-# logging losses, metrics in WandB
-
-for key, value in test_eval_metrics.items():
-    wandb.log({'test_eval_'+key: value[0]}, step=i)
-    # logging climdex indices in WandB
-wandb.log({'test_txx_bias_mean':test_txx_bias_mean}, step=i)
-wandb.log({'test_txx_bias_std':test_txx_bias_std}, step=i)
-wandb.log({'test_txn_bias_mean':test_txn_bias_mean}, step=i)
-wandb.log({'test_txn_bias_std':test_txn_bias_std}, step=i)
+    # Saving the last model
+    model_joint.save(f'model_checkpoints/final_jflvm_checkpoint')
 
 
-# saving the model
-if not os.path.exists('final_model'):
-    os.mkdir('./final_model')
-finale_model_path = model_joint.save('./final_model/')
-print('final model saved at:', finale_model_path)
+if __name__ == "__main__":
+    main()
